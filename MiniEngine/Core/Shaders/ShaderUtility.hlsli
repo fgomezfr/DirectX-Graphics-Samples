@@ -11,31 +11,13 @@
 // Author:  James Stanard 
 //
 
-float3 LinearToSRGB( float3 x )
-{
-	// This can be 9 cycles faster than the "precise" version
-	return x < 0.0031308 ? 12.92 * x : 1.13005 * sqrt(abs(x - 0.00228)) - 0.13448 * x + 0.005719;
-}
+#ifndef __SHADER_UTILITY_HLSLI__
+#define __SHADER_UTILITY_HLSLI__
 
-float3 LinearToSRGB_Exact( float3 x )
-{
-	return x < 0.0031308 ? 12.92 * x : 1.055 * pow(abs(x), 1.0 / 2.4) - 0.055;
-}
+#pragma warning( disable : 3571 )
 
-float3 SRGBToLinear_Exact( float3 x )
-{
-	return x < 0.04045 ? x / 12.92 : pow( (abs(x) + 0.055) / 1.055, 2.4 );
-}
-
-float3 LinearToREC709_Exact( float3 x )
-{
-	return x < 0.0018 ? 4.5 * x : 1.099 * pow(abs(x), 0.45) - 0.099;
-}
-
-float3 REC709ToLinear_Exact( float3 x )
-{
-	return x < 0.0081 ? x / 4.5 : pow(abs((x + 0.099) / 1.099), 1.0 / 0.45);
-}
+#include "ColorSpaceUtility.hlsli"
+#include "PixelPacking.hlsli"
 
 // Encodes a smooth logarithmic gradient for even distribution of precision natural to vision
 float LinearToLogLuminance( float x, float gamma = 4.0 )
@@ -47,22 +29,12 @@ float LinearToLogLuminance( float x, float gamma = 4.0 )
 // coefficients.  Note that this operates on linear values, not gamma space.
 float RGBToLuminance( float3 x )
 {
-	return dot( x, float3(0.212671, 0.715160, 0.072169) );		// Defined by sRGB gamut
-//	return dot( x, float3(0.299, 0.587, 0.114) );				// Old CRT phosphor luma measurements
+	return dot( x, float3(0.212671, 0.715160, 0.072169) );		// Defined by sRGB/Rec.709 gamut
 }
 
-// Assumes the "white point" is 1.0.  Prescale your HDR values if otherwise.  'E' affects the rate
-// at which colors blow out to white.
-float3 ToneMap( float3 hdr, float E = 4.0 )
+float MaxChannel(float3 x)
 {
-	return (1 - exp2(-E * hdr)) / (1 - exp2(-E));
-}
-
-// This variant rescales only the luminance of the color to fit in the [0, 1] range while preserving hue.
-float3 ToneMap2( float3 hdr, float E = 4.0 )
-{
-	float luma = RGBToLuminance(hdr);
-	return hdr * (1 - exp2(-E * luma)) / (1 - exp2(-E)) / (luma + 0.0001);
+	return max(x.x, max(x.y, x.z));
 }
 
 // This is the same as above, but converts the linear luminance value to a more subjective "perceived luminance",
@@ -72,14 +44,26 @@ float RGBToLogLuminance( float3 x, float gamma = 4.0 )
 	return LinearToLogLuminance( RGBToLuminance(x), gamma );
 }
 
-float3 RGBFullToLimited( float3 x )
+// 8-bit should range from 16 to 235
+float3 RGBFullToLimited8bit( float3 x )
 {
 	return saturate(x) * 219.0 / 255.0 + 16.0 / 255.0;
 }
 
-float3 RGBLimitedToFull( float3 x )
+float3 RGBLimitedToFull8bit( float3 x )
 {
 	return saturate((x - 16.0 / 255.0) * 255.0 / 219.0);
+}
+
+// 10-bit should range from 64 to 940
+float3 RGBFullToLimited10bit( float3 x )
+{
+	return saturate(x) * 876.0 / 1023.0 + 64.0 / 1023.0;
+}
+
+float3 RGBLimitedToFull10bit( float3 x )
+{
+	return saturate((x - 64.0 / 1023.0) * 1023.0 / 876.0);
 }
 
 #define COLOR_FORMAT_LINEAR			0
@@ -87,19 +71,13 @@ float3 RGBLimitedToFull( float3 x )
 #define COLOR_FORMAT_sRGB_LIMITED	2
 #define COLOR_FORMAT_Rec709_FULL	3
 #define COLOR_FORMAT_Rec709_LIMITED	4
-#define COLOR_FORMAT_7e3_FLOAT_FULL	5
-#define COLOR_FORMAT_6e4_FLOAT_FULL	6
+#define COLOR_FORMAT_HDR10			5
 #define COLOR_FORMAT_TV_DEFAULT		COLOR_FORMAT_Rec709_LIMITED
 #define COLOR_FORMAT_PC_DEFAULT		COLOR_FORMAT_sRGB_FULL
 
 #define HDR_COLOR_FORMAT			COLOR_FORMAT_LINEAR
 #define LDR_COLOR_FORMAT			COLOR_FORMAT_LINEAR
-#if _XBOX_ONE
-	#define DISPLAY_PLANE_FORMAT	COLOR_FORMAT_TV_DEFAULT
-	#define OVERLAY_PLANE_FORMAT	COLOR_FORMAT_sRGB_FULL
-#else
-	#define DISPLAY_PLANE_FORMAT	COLOR_FORMAT_PC_DEFAULT
-#endif
+#define DISPLAY_PLANE_FORMAT		COLOR_FORMAT_PC_DEFAULT
 
 float3 ApplyColorProfile( float3 x, int Format )
 {
@@ -111,17 +89,13 @@ float3 ApplyColorProfile( float3 x, int Format )
 	case COLOR_FORMAT_sRGB_FULL:
 		return LinearToSRGB(x);
 	case COLOR_FORMAT_sRGB_LIMITED:
-		return RGBFullToLimited(LinearToSRGB(x));
+		return RGBFullToLimited10bit(LinearToSRGB(x));
 	case COLOR_FORMAT_Rec709_FULL:
-		return LinearToREC709_Exact(x);
+		return LinearToREC709(x);
 	case COLOR_FORMAT_Rec709_LIMITED:
-		return RGBFullToLimited(LinearToREC709_Exact(x));
-
-	// Xbox formats:  10-bit floats with biased exponents; range: [0, 2)
-	case COLOR_FORMAT_7e3_FLOAT_FULL:
-		return x * 16.0;
-	case COLOR_FORMAT_6e4_FLOAT_FULL:
-		return x * 256.0;
+		return RGBFullToLimited10bit(LinearToREC709(x));
+	case COLOR_FORMAT_HDR10:
+		return LinearToREC2084(REC709toREC2020(x));
 	};
 }
 
@@ -133,19 +107,15 @@ float3 LinearizeColor( float3 x, int Format )
 	case COLOR_FORMAT_LINEAR:
 		return x;
 	case COLOR_FORMAT_sRGB_FULL:
-		return SRGBToLinear_Exact(x);
+		return SRGBToLinear(x);
 	case COLOR_FORMAT_sRGB_LIMITED:
-		return SRGBToLinear_Exact(RGBLimitedToFull(x));
+		return SRGBToLinear(RGBLimitedToFull10bit(x));
 	case COLOR_FORMAT_Rec709_FULL:
-		return REC709ToLinear_Exact(x);
+		return REC709ToLinear(x);
 	case COLOR_FORMAT_Rec709_LIMITED:
-		return REC709ToLinear_Exact(RGBLimitedToFull(x));
-
-	// Xbox formats:  10-bit floats with biased exponents; range: [0, 2)
-	case COLOR_FORMAT_7e3_FLOAT_FULL:
-		return x / 16.0;
-	case COLOR_FORMAT_6e4_FLOAT_FULL:
-		return x / 256.0;
+		return REC709ToLinear(RGBLimitedToFull10bit(x));
+	case COLOR_FORMAT_HDR10:
+		return REC2020toREC709(REC2084ToLinear(x));
 	};
 }
 
@@ -156,3 +126,5 @@ float3 ConvertColor( float3 x, int FromFormat, int ToFormat )
 
 	return ApplyColorProfile(LinearizeColor(x, FromFormat), ToFormat);
 }
+
+#endif // __SHADER_UTILITY_HLSLI__

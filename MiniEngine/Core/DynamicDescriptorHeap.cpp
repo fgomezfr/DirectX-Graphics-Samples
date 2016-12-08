@@ -17,13 +17,8 @@
 #include "GraphicsCore.h"
 #include "CommandListManager.h"
 #include "RootSignature.h"
-#include <intrin.h>
 
 using namespace Graphics;
-
-#pragma intrinsic(_BitScanReverse)
-#pragma intrinsic(_BitScanForward)
-#pragma intrinsic(_BitScanForward64)
 
 //
 // DynamicDescriptorHeap Implementation
@@ -34,11 +29,6 @@ std::vector<Microsoft::WRL::ComPtr<ID3D12DescriptorHeap>> DynamicDescriptorHeap:
 std::queue<std::pair<uint64_t, ID3D12DescriptorHeap*>> DynamicDescriptorHeap::sm_RetiredDescriptorHeaps;
 std::queue<ID3D12DescriptorHeap*> DynamicDescriptorHeap::sm_AvailableDescriptorHeaps;
 uint32_t DynamicDescriptorHeap::sm_DescriptorSize = 0;
-
-void DynamicDescriptorHeap::DestroyAll(void)
-{
-	sm_DescriptorHeapPool.clear();
-}
 
 ID3D12DescriptorHeap* DynamicDescriptorHeap::RequestDescriptorHeap(void)
 {
@@ -136,12 +126,12 @@ uint32_t DynamicDescriptorHeap::DescriptorHandleCache::ComputeStagedSize()
 	uint32_t NeededSpace = 0;
 	uint32_t RootIndex;
 	uint32_t StaleParams = m_StaleRootParamsBitMap;
-	while (_BitScanForward((unsigned long*)&RootIndex, StaleParams))
+	while (BitScanForward((unsigned long*)&RootIndex, StaleParams))
 	{
 		StaleParams ^= (1 << RootIndex);
 
 		uint32_t MaxSetHandle;
-		ASSERT(TRUE == _BitScanReverse((unsigned long*)&MaxSetHandle, m_RootDescriptorTable[RootIndex].AssignedHandlesBitMap),
+		ASSERT(TRUE == BitScanReverse((unsigned long*)&MaxSetHandle, m_RootDescriptorTable[RootIndex].AssignedHandlesBitMap),
 			"Root entry marked as stale but has no stale descriptors");
 
 		NeededSpace += MaxSetHandle + 1;
@@ -161,13 +151,13 @@ void DynamicDescriptorHeap::DescriptorHandleCache::CopyAndBindStaleTables(
 
 	// Sum the maximum assigned offsets of stale descriptor tables to determine total needed space.
 	uint32_t StaleParams = m_StaleRootParamsBitMap;
-	while (_BitScanForward((unsigned long*)&RootIndex, StaleParams))
+	while (BitScanForward((unsigned long*)&RootIndex, StaleParams))
 	{
 		RootIndices[StaleParamCount] = RootIndex;
 		StaleParams ^= (1 << RootIndex);
 
 		uint32_t MaxSetHandle;
-		ASSERT(TRUE == _BitScanReverse((unsigned long*)&MaxSetHandle, m_RootDescriptorTable[RootIndex].AssignedHandlesBitMap),
+		ASSERT(TRUE == BitScanReverse((unsigned long*)&MaxSetHandle, m_RootDescriptorTable[RootIndex].AssignedHandlesBitMap),
 			"Root entry marked as stale but has no stale descriptors");
 
 		NeededSpace += MaxSetHandle + 1;
@@ -205,7 +195,7 @@ void DynamicDescriptorHeap::DescriptorHandleCache::CopyAndBindStaleTables(
 		DestHandleStart += TableSize[i] * kDescriptorSize;
 
 		unsigned long SkipCount;
-		while (_BitScanForward64(&SkipCount, SetHandles))
+		while (BitScanForward64(&SkipCount, SetHandles))
 		{
 			// Skip over unset descriptor handles
 			SetHandles >>= SkipCount;
@@ -213,7 +203,7 @@ void DynamicDescriptorHeap::DescriptorHandleCache::CopyAndBindStaleTables(
 			CurDest.ptr += SkipCount * kDescriptorSize;
 
 			unsigned long DescriptorCount;
-			_BitScanForward64(&DescriptorCount, ~SetHandles);
+			BitScanForward64(&DescriptorCount, ~SetHandles);
 			SetHandles >>= DescriptorCount;
 
 			// If we run out of temp room, copy what we've got so far
@@ -234,9 +224,9 @@ void DynamicDescriptorHeap::DescriptorHandleCache::CopyAndBindStaleTables(
 			++NumDestDescriptorRanges;
 
 			// Setup source ranges (one descriptor each because we don't assume they are contiguous)
-			for (UINT i = 0; i < DescriptorCount; ++i)
+			for (uint32_t j = 0; j < DescriptorCount; ++j)
 			{
-				pSrcDescriptorRangeStarts[NumSrcDescriptorRanges] = SrcHandles[i];
+				pSrcDescriptorRangeStarts[NumSrcDescriptorRanges] = SrcHandles[j];
 				pSrcDescriptorRangeSizes[NumSrcDescriptorRanges] = 1;
 				++NumSrcDescriptorRanges;
 			}
@@ -261,6 +251,7 @@ void DynamicDescriptorHeap::CopyAndBindStagedTables( DescriptorHandleCache& Hand
 	{
 		RetireCurrentHeap();
 		UnbindAllValid();
+		NeededSize = HandleCache.ComputeStagedSize();
 	}
 
 	// This can trigger the creation of a new heap
@@ -299,7 +290,7 @@ void DynamicDescriptorHeap::DescriptorHandleCache::UnbindAllValid()
 
 	unsigned long TableParams = m_RootDescriptorTablesBitMap;
 	unsigned long RootIndex;
-	while (_BitScanForward(&RootIndex, TableParams))
+	while (BitScanForward(&RootIndex, TableParams))
 	{
 		TableParams ^= (1 << RootIndex);
 		if (m_RootDescriptorTable[RootIndex].AssignedHandlesBitMap != 0)
@@ -331,7 +322,7 @@ void DynamicDescriptorHeap::DescriptorHandleCache::ParseRootSignature( const Roo
 
 	unsigned long TableParams = m_RootDescriptorTablesBitMap;
 	unsigned long RootIndex;
-	while (_BitScanForward(&RootIndex, TableParams))
+	while (BitScanForward(&RootIndex, TableParams))
 	{
 		TableParams ^= (1 << RootIndex);
 

@@ -24,11 +24,11 @@ void ColorBuffer::CreateDerivedViews(ID3D12Device* Device, DXGI_FORMAT Format, u
 	m_NumMipMaps = NumMips - 1;
 
 	D3D12_RENDER_TARGET_VIEW_DESC RTVDesc = {};
-    D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
-    D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+	D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+	D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
 
-    RTVDesc.Format = Format;
-    UAVDesc.Format = GetUAVFormat(Format);
+	RTVDesc.Format = Format;
+	UAVDesc.Format = GetUAVFormat(Format);
 	SRVDesc.Format = Format;
 	SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
@@ -63,7 +63,7 @@ void ColorBuffer::CreateDerivedViews(ID3D12Device* Device, DXGI_FORMAT Format, u
 		SRVDesc.Texture2D.MostDetailedMip = 0;
 	}
 
-	if (m_SRVHandle.ptr == ~0ull)
+	if (m_SRVHandle.ptr == D3D12_GPU_VIRTUAL_ADDRESS_UNKNOWN)
 	{
 		m_RTVHandle = Graphics::AllocateDescriptor(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 		m_SRVHandle = Graphics::AllocateDescriptor(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -71,16 +71,16 @@ void ColorBuffer::CreateDerivedViews(ID3D12Device* Device, DXGI_FORMAT Format, u
 
 	ID3D12Resource* Resource = m_pResource.Get();
 
-    // Create the render target view
+	// Create the render target view
 	Device->CreateRenderTargetView(Resource, &RTVDesc, m_RTVHandle);
 
-    // Create the shader resource view
+	// Create the shader resource view
 	Device->CreateShaderResourceView(Resource, &SRVDesc, m_SRVHandle);
 
 	// Create the UAVs for each mip level (RWTexture2D)
 	for (uint32_t i = 0; i < NumMips; ++i)
 	{
-		if (m_UAVHandle[i].ptr == ~0ull)
+		if (m_UAVHandle[i].ptr == D3D12_GPU_VIRTUAL_ADDRESS_UNKNOWN)
 			m_UAVHandle[i] = Graphics::AllocateDescriptor(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
 		Device->CreateUnorderedAccessView(Resource, nullptr, &UAVDesc, m_UAVHandle[i]);
@@ -180,7 +180,8 @@ void ColorBuffer::GenerateMipMaps(CommandContext& BaseContext)
 		// each successive downsample.  We use _BitScanForward to count number of zeros
 		// in the low bits.  Zeros indicate we can divide by two without truncating.
 		uint32_t AdditionalMips;
-		_BitScanForward((unsigned long*)&AdditionalMips, DstWidth | DstHeight);
+		_BitScanForward((unsigned long*)&AdditionalMips,
+			(DstWidth == 1 ? DstHeight : DstWidth) | (DstHeight == 1 ? DstWidth : DstHeight));
 		uint32_t NumMips = 1 + (AdditionalMips > 3 ? 3 : AdditionalMips);
 		if (TopMip + NumMips > m_NumMipMaps)
 			NumMips = m_NumMipMaps - TopMip;

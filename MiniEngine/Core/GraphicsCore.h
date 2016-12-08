@@ -23,6 +23,7 @@ class GraphicsPSO;
 class CommandContext;
 class CommandListManager;
 class CommandSignature;
+class ContextManager;
 
 namespace Graphics
 {
@@ -54,8 +55,11 @@ namespace Graphics
 
 	extern ID3D12Device* g_Device;
 	extern CommandListManager g_CommandManager;
+	extern ContextManager g_ContextManager;
 
 	extern D3D_FEATURE_LEVEL g_D3DFeatureLevel;
+	extern bool g_bTypedUAVLoadSupport_R11G11B10_FLOAT;
+	extern bool g_bEnableHDROutput;
 
 	extern SamplerDesc SamplerLinearWrapDesc;
 	extern SamplerDesc SamplerAnisoWrapDesc;

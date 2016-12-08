@@ -13,23 +13,26 @@
 
 #include "ShaderUtility.hlsli"
 #include "MotionBlurRS.hlsli"
+#include "PixelPacking.hlsli"
 
 #define USE_LINEAR_Z
 
-Texture2D<float3> SrcColor : register(t0);
-Texture2D<float> DepthBuffer : register(t1);
-Texture2D<float4> TemporalIn : register(t2);
+Texture2D<float2> ReprojectionBuffer : register(t0);
+Texture2D<float4> TemporalIn : register(t1);
 
+#if SUPPORT_TYPED_UAV_LOADS
 RWTexture2D<float3> DstColor : register(u0);		// final output color (blurred and temporally blended)
+#else
+RWTexture2D<uint> DstColor : register(u0);
+#endif
 RWTexture2D<float4> TemporalOut : register(u1);		// color to save for next frame including its validity in alpha
 
 SamplerState LinearSampler : register(s0);
 
-cbuffer ConstantBuffer : register(b1)
+cbuffer ConstantBuffer : register(b0)
 {
-	matrix CurToPrevXForm;
 	float2 RcpBufferDim;	// 1 / width, 1 / height
-	float  TemporalBlendFactor;
+	float TemporalBlendFactor;
 }
 
 struct MRT
@@ -45,21 +48,24 @@ void main( uint3 Gid : SV_GroupID, uint GI : SV_GroupIndex, uint3 GTid : SV_Grou
 	uint2 st = DTid.xy;
 	float2 position = st + 0.5;
 	float2 curUV = position * RcpBufferDim;
-
-	float Depth = DepthBuffer[st];
-#ifdef USE_LINEAR_Z
-	float4 HPos = float4( position * Depth, 1.0, Depth );
-#else
-	float4 HPos = float4( position, Depth, 1.0 );
-#endif
-	float4 PrevHPos = mul( CurToPrevXForm, HPos );
-	float2 PrevPixel = PrevHPos.xy / PrevHPos.w;
-	float2 velocity = PrevPixel - position.xy;
-
-	float2 preUV = PrevPixel * RcpBufferDim;
+	float2 velocity = ReprojectionBuffer[st];
+	float2 preUV = (position + velocity) * RcpBufferDim;
+#if 1
 	float4 lastColor = TemporalIn.SampleLevel( LinearSampler, preUV, 0 );
-	float3 thisColor = SrcColor[st];
-	float thisValidity = 1.0 - saturate(length(velocity) / 4.0);
+#else
+	float4 lastColor = 0.25 * (
+		TemporalIn.SampleLevel(LinearSampler, preUV + float2(+0.5, +0.5) * RcpBufferDim, 0) +
+		TemporalIn.SampleLevel(LinearSampler, preUV + float2(+0.5, -0.5) * RcpBufferDim, 0) +
+		TemporalIn.SampleLevel(LinearSampler, preUV + float2(-0.5, +0.5) * RcpBufferDim, 0) +
+		TemporalIn.SampleLevel(LinearSampler, preUV + float2(-0.5, -0.5) * RcpBufferDim, 0));
+#endif
+
+#if SUPPORT_TYPED_UAV_LOADS
+	float3 thisColor = DstColor[st];
+#else
+	float3 thisColor = Unpack_R11G11B10_FLOAT(DstColor[st]);
+#endif
+	float thisValidity = 1.0;// - saturate(length(velocity) / 4.0);
 
 #if 1
 	// 2x super sampling with no feedback
@@ -71,6 +77,10 @@ void main( uint3 Gid : SV_GroupID, uint GI : SV_GroupIndex, uint3 GTid : SV_Grou
 	float4 savedColor = float4( displayColor, thisValidity );
 #endif
 
+#if SUPPORT_TYPED_UAV_LOADS
 	DstColor[st] = displayColor;
+#else
+	DstColor[st] = Pack_R11G11B10_FLOAT(displayColor);
+#endif
 	TemporalOut[st] = savedColor;
 }

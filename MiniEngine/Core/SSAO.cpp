@@ -36,6 +36,7 @@ namespace SSAO
 {
 	BoolVar Enable("Graphics/SSAO/Enable", true);
 	BoolVar DebugDraw("Graphics/SSAO/Debug Draw", false);
+	BoolVar AsyncCompute("Graphics/SSAO/Async Compute", false);
 	BoolVar ComputeLinearZ("Graphics/SSAO/Always Linearize Z", true);
 
 	// High quality (and better) is barely a noticeable improvement when modulated properly with ambient light.
@@ -90,7 +91,7 @@ void SSAO::Initialize( void )
 	s_RootSignature[2].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 0, 5);
 	s_RootSignature[3].InitAsDescriptorRange(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 0, 5);
 	s_RootSignature[4].InitAsBufferSRV(5);
-	s_RootSignature.Finalize();
+	s_RootSignature.Finalize(L"SSAO");
 
 #define CreatePSO( ObjName, ShaderByteCode ) \
 	ObjName.SetRootSignature(s_RootSignature); \
@@ -286,29 +287,29 @@ namespace SSAO
 	}
 }
 
-void SSAO::Render( CommandContext& BaseContext, const Camera& camera )
+void SSAO::Render( GraphicsContext& GfxContext, const Camera& camera )
 {
 	const float* pProjMat = reinterpret_cast<const float*>(&camera.GetProjMatrix());
-	Render( BaseContext, pProjMat, camera.GetNearClip(), camera.GetFarClip() );
+	Render(GfxContext, pProjMat, camera.GetNearClip(), camera.GetFarClip() );
 }
 
-void SSAO::Render( CommandContext& BaseContext, const float* ProjMat, float NearClipDist, float FarClipDist )
+void SSAO::Render( GraphicsContext& GfxContext, const float* ProjMat, float NearClipDist, float FarClipDist )
 {
-	ScopedTimer _prof(L"Generate SSAO", BaseContext);
-
-	ComputeContext& Context = BaseContext.GetComputeContext();
-	Context.SetRootSignature(s_RootSignature);
-
 	const float zMagic = (FarClipDist - NearClipDist) / NearClipDist;
 
 	if (!Enable)
 	{
-		GraphicsContext& graphicsContext = BaseContext.GetGraphicsContext();
-		graphicsContext.ClearColor(g_SSAOFullScreen);
-		graphicsContext.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		ScopedTimer _prof(L"Generate SSAO", GfxContext);
+
+		GfxContext.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_RENDER_TARGET, true);
+		GfxContext.ClearColor(g_SSAOFullScreen);
+		GfxContext.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
 		if (!ComputeLinearZ)
 			return;
+
+		ComputeContext& Context = GfxContext.GetComputeContext();
+		Context.SetRootSignature(s_RootSignature);
 
 		Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 		Context.SetConstants(0, zMagic);
@@ -332,10 +333,25 @@ void SSAO::Render( CommandContext& BaseContext, const float* ProjMat, float Near
 		return;
 	}
 
+	GfxContext.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	GfxContext.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+	if (AsyncCompute)
+	{
+		// Flush the ZPrePass and wait for it on the compute queue
+		g_CommandManager.GetComputeQueue().StallForFence(GfxContext.Flush());
+	}
+	else
+	{
+		EngineProfiling::BeginBlock(L"Generate SSAO", &GfxContext);
+	}
+
+	ComputeContext& Context = AsyncCompute ? ComputeContext::Begin(L"Async SSAO", true) : GfxContext.GetComputeContext();
+	Context.SetRootSignature(s_RootSignature);
+
 	{ ScopedTimer _prof(L"Decompress and downsample", Context);
 
 	// Phase 1:  Decompress, linearize, downsample, and deinterleave the depth buffer
-	Context.TransitionResource(g_SceneDepthBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 	Context.SetConstants(0, zMagic);
 	Context.SetDynamicDescriptor(3, 0, g_SceneDepthBuffer.GetDepthSRV() );
 
@@ -479,18 +495,26 @@ void SSAO::Render( CommandContext& BaseContext, const float* ProjMat, float Near
 
 	} // End blur and upsample
 
+	if (AsyncCompute)
+		Context.Finish();
+	else
+		EngineProfiling::EndBlock(&GfxContext);
+
 	if (DebugDraw)
 	{
-		Context.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-		Context.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-		Context.SetPipelineState(s_DebugSSAOCS);
-		Context.SetDynamicDescriptors(2, 0, 1, &g_SceneColorBuffer.GetUAV());
-		Context.SetDynamicDescriptors(3, 0, 1, &g_SSAOFullScreen.GetSRV());
-		Context.Dispatch2D(g_SSAOFullScreen.GetWidth(), g_SSAOFullScreen.GetHeight());
-		Context.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_RENDER_TARGET);
-	}
-	else
-	{
-		Context.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		if (AsyncCompute)
+		{
+			g_CommandManager.GetGraphicsQueue().StallForProducer(
+				g_CommandManager.GetComputeQueue());
+		}
+
+		ComputeContext& CC = GfxContext.GetComputeContext();
+		CC.TransitionResource(g_SceneColorBuffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		CC.TransitionResource(g_SSAOFullScreen, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		CC.SetRootSignature(s_RootSignature);
+		CC.SetPipelineState(s_DebugSSAOCS);
+		CC.SetDynamicDescriptors(2, 0, 1, &g_SceneColorBuffer.GetUAV());
+		CC.SetDynamicDescriptors(3, 0, 1, &g_SSAOFullScreen.GetSRV());
+		CC.Dispatch2D(g_SSAOFullScreen.GetWidth(), g_SSAOFullScreen.GetHeight());
 	}
 }
